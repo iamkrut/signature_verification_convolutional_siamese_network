@@ -20,6 +20,7 @@ import itertools as it
 
 
 def imshow(img,text=None, should_save=False):
+    plt.figure()
     npimg = img.numpy()
     plt.axis("off")
     if text:
@@ -28,9 +29,9 @@ def imshow(img,text=None, should_save=False):
     plt.savefig("grid.png")
 
 
-def show_plot(iteration, loss):
-    plt.plot(iteration, loss)
-    plt.savefig("loss.png")
+# def show_plot(iteration, loss):
+#     plt.plot(iteration, loss)
+#     plt.savefig("loss.png")
 
 
 class Config:
@@ -38,21 +39,15 @@ class Config:
     forged_dir = "./signatures/full_forg/"
     train_batch_size = 16
     val_batch_size = 8
-    train_number_epochs = 20
-
+    train_number_epochs = 5
+    lr = 1e-3
 
 def format_image_name(filename):
     ref = re.findall(r'\d+', filename)
     return ref[0], ref[1]
 
 
-def generate_permutations(list):
-    permutations = []
-
-    return permutations
-
-
-def generate_permutations(list_1, list_2 = None):
+def generate_permutations(list_1, list_2=None):
     permutations = []
 
     if list_2 is not None:
@@ -61,6 +56,31 @@ def generate_permutations(list_1, list_2 = None):
         for a, b in it.combinations(list_1, 2):
             permutations.append((a, b))
     return permutations
+
+
+def compute_accuracy_roc(predictions, labels):
+    dmax = np.max(predictions)
+    dmin = np.min(predictions)
+    nsame = np.sum(labels == 1)
+    ndiff = np.sum(labels == 0)
+    step = 0.01
+    max_acc = 0
+
+    d_optimal = 0
+    for d in np.arange(dmin, dmax + step, step):
+        idx1 = predictions.ravel() <= d
+        idx2 = predictions.ravel() > d
+
+        tpr = float(np.sum(labels[idx1] == 1)) / nsame
+        tnr = float(np.sum(labels[idx2] == 0)) / ndiff
+
+        acc = 0.5 * (tpr + tnr)
+
+        if acc > max_acc:
+            max_acc = acc
+            d_optimal = d
+
+    return max_acc, d_optimal
 
 
 class SiameseNetworkDataset(Dataset):
@@ -84,20 +104,20 @@ class SiameseNetworkDataset(Dataset):
 
         # randomly sample signer _id's for training
         random.seed(3)
-        train_ids = random.sample(list(self.org.keys()), no_train_signers)
+        train_ids = random.sample(list(self.org.keys()), no_train_signers)[:1]
 
         self.data = []
 
         # combine org and forg to form train or val data
         if self.is_train:
             for _id in train_ids:
-                self.data.extend([(obs[0], obs[1], 0) for obs in self.org[_id]])
-                self.data.extend([(obs[0], obs[1], 1) for obs in self.forg[_id]])
+                self.data.extend([(obs[0], obs[1], 1.0) for obs in self.org[_id]])
+                self.data.extend([(obs[0], obs[1], 0.0) for obs in self.forg[_id]])
         else:
-            val_ids = list(set(self.org.keys()).difference(set(train_ids))) # getting the validation ids
+            val_ids = list(set(self.org.keys()).difference(set(train_ids)))[:1] # getting the validation ids
             for _id in val_ids:
-                self.data.extend([(obs[0], obs[1], 0) for obs in self.org[_id]])
-                self.data.extend([(obs[0], obs[1], 1) for obs in self.forg[_id]])
+                self.data.extend([(obs[0], obs[1], 1.0) for obs in self.org[_id]])
+                self.data.extend([(obs[0], obs[1], 0.0) for obs in self.forg[_id]])
 
         self.org.clear()
         self.forg.clear()
@@ -131,15 +151,14 @@ class ContrastiveLoss(torch.nn.Module):
     Based on: http://yann.lecun.com/exdb/publis/pdf/hadsell-chopra-lecun-06.pdf
     """
 
-    def __init__(self, margin=2.0):
+    def __init__(self, margin=1.0):
         super(ContrastiveLoss, self).__init__()
         self.margin = margin
 
     def forward(self, output1, output2, label):
         euclidean_distance = F.pairwise_distance(output1, output2, keepdim = True)
-        loss_contrastive = torch.mean((1-label) * torch.pow(euclidean_distance, 2) +
-                                      (label) * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2))
-
+        loss_contrastive = torch.mean((label) * torch.pow(euclidean_distance, 2) +
+                                      (1-label) * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2))
 
         return loss_contrastive
 
@@ -151,42 +170,60 @@ if __name__ == '__main__':
 
     folder_dataset = dset.ImageFolder(root=Config.original_dir)
     train_dataset = SiameseNetworkDataset(image_folder_dataset=folder_dataset,
-                                          transform=transforms.Compose([transforms.Resize((155, 220)),
-                                                                        transforms.ToTensor()]),
+                                          transform=transforms.Compose([transforms.Resize((155, 220), interpolation=PIL.Image.BILINEAR),
+                                                                        transforms.ToTensor(),
+                                                                        transforms.Normalize(mean=[0.5], std=[0.5])]),
                                           should_invert=True,
                                           is_train=True)
     val_dataset = SiameseNetworkDataset(image_folder_dataset=folder_dataset,
-                                        transform=transforms.Compose([transforms.Resize((155, 220)),
-                                                                      transforms.ToTensor()]),
+                                        transform=transforms.Compose([transforms.Resize((155, 220), interpolation=PIL.Image.BILINEAR),
+                                                                      transforms.ToTensor(),
+                                                                      transforms.Normalize(mean=[0.5], std=[0.5])]),
                                         should_invert=True,
                                         is_train=False)
 
-    # # visual some sample data
-    # vis_dataloader = DataLoader(siamese_dataset, shuffle=True, num_workers=8, batch_size=8)
-    # dataiter = iter(vis_dataloader)
-    #
-    # example_batch = next(dataiter)
-    # concatenated = torch.cat((example_batch[0],example_batch[1]),0)
-    # imshow(torchvision.utils.make_grid(concatenated))
-    # # print(example_batch[2].numpy())
+    # visual some sample data
+    vis_dataloader = DataLoader(train_dataset, shuffle=True, num_workers=8, batch_size=8)
+    dataiter = iter(vis_dataloader)
 
-    train_dataloader = DataLoader(train_dataset, shuffle=True, num_workers=2, batch_size=Config.train_batch_size)
-    val_dataloader = DataLoader(val_dataset, shuffle=False, num_workers=1, batch_size=Config.val_batch_size)
+    example_batch = next(dataiter)
+    concatenated = torch.cat((example_batch[0],example_batch[1]),0)
+    # torchvision.utils.save_image((concatenated), 'train_data.png')
+    imshow(torchvision.utils.make_grid(concatenated))
+    # print(example_batch[2].numpy())
+
+    train_dataloader = DataLoader(train_dataset, shuffle=True, num_workers=8, batch_size=Config.train_batch_size)
+    val_dataloader = DataLoader(val_dataset, shuffle=True, num_workers=2, batch_size=Config.val_batch_size)
 
     net = SigNetModel()
 
     criterion = ContrastiveLoss()
-    optimizer = optim.RMSprop(net.parameters(), lr=0.0004, eps=1e-08, weight_decay=0.0005, momentum=0.9)
+    optimizer = optim.RMSprop(net.parameters(), lr=Config.lr, eps=1e-8, weight_decay=0.0005, momentum=0.9)
 
     if is_cuda:
         net.cuda()
 
-    loss_history = defaultdict(list)
+    metric_history = defaultdict(list)
 
-    for epoch in range(0,Config.train_number_epochs):
+    print(net)
+    print("Train data: ", len(train_dataset))
+    print("Val data: ", len(val_dataset))
+
+    for epoch in range(0, Config.train_number_epochs):
+
+        # adjusting learning rate
+        # lr = Config.lr * (0.1 ** epoch)
+        # for param_group in optimizer.param_groups:
+        #     param_group['lr'] = lr
+        #
+        # print("lr: ", lr)
 
         acc_train_loss = 0
         acc_val_loss = 0
+        avg_acc = 0
+        avg_distance_threshold = 0
+        val_predictions = []
+        val_labels = []
 
         # training
         net.train()
@@ -200,7 +237,7 @@ if __name__ == '__main__':
             loss_contrastive.backward()
             optimizer.step()
             acc_train_loss += loss_contrastive.item()
-        loss_history['train'].append(acc_train_loss / (i+1))
+        metric_history['train'].append(acc_train_loss / (i+1))
 
         # validation
         net.eval()
@@ -212,9 +249,34 @@ if __name__ == '__main__':
             output1, output2 = net(img0, img1)
             loss_contrastive = criterion(output1, output2, label)
             acc_val_loss += loss_contrastive.item()
-        loss_history['val'].append(acc_val_loss / (i+1))
 
-        print("Epoch number {} Train loss {} Val loss {}".format(epoch, loss_history['train'][-1], loss_history['val'][-1]))
+            # predictions
+            euclidean_distance = F.pairwise_distance(output1, output2, keepdim=True)
+            if is_cuda:
+                euclidean_distance = euclidean_distance.cpu()
+                label = label.cpu()
+            val_predictions.extend(euclidean_distance.detach().numpy())
+            val_labels.extend(label.detach().numpy())
+
+            # concatenated = torch.cat((img0, img1), 0)
+            # torchvision.utils.save_image((concatenated), 'Dissimilarity: {:.2f}'.format(euclidean_distance.item()), 'val_'+epoch+'.png')
+
+        acc, d = compute_accuracy_roc(np.array(val_predictions), np.array(val_labels))
+        metric_history['val'].append(acc_val_loss / (i+1))
+        metric_history['acc'].append(acc)
+        print("\nEpoch number {} Train loss {} Val loss {}".format(epoch, metric_history['train'][-1], metric_history['val'][-1]))
+        print('Max accuracy {} at distance threshold {}'.format(acc, d))
 
     torch.save(net.state_dict(), 'cedar_cl.dth')
-    # show_plot(counter, loss_history)
+
+    # plot loss metric
+    # plt.figure()
+    # plt.clf()
+    # iter = [i for i in range(0, epoch+1)]
+    # plt.plot(iter, metric_history['train'], '-r', label='train loss')
+    # plt.plot(iter, metric_history['val'], '-b', label='val loss')
+    # # plt.plot(iter, metric_history['acc'], '-g', label='val accuracy')
+    # plt.xlabel("epochs")
+    # plt.ylabel("loss")
+    # plt.legend(loc='upper left')
+    # plt.savefig('loss_plot.png')
