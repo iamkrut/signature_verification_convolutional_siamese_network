@@ -194,7 +194,7 @@ if __name__ == '__main__':
 
     criterion = ContrastiveLoss()
     # optimizer = optim.RMSprop(net.parameters(), lr=Config.lr, eps=1e-8, weight_decay=0.0005, momentum=0.9)
-    optimizer = optim.Adam(net.parameters(), lr=Config.lr, eps=1e-8, weight_decay=0.005)
+    optimizer = optim.Adam(net.parameters(), lr=Config.lr, weight_decay=0.0001)
 
     if is_cuda:
         net.cuda()
