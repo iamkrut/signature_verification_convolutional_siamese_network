@@ -39,8 +39,8 @@ class Config:
     forged_dir = "./signatures/full_forg/"
     train_batch_size = 16
     val_batch_size = 8
-    train_number_epochs = 5
-    lr = 1e-3
+    train_number_epochs = 20
+    lr = 1e-4
     file_prefix = "contrastive_"
 
 def format_image_name(filename):
@@ -59,29 +59,23 @@ def generate_permutations(list_1, list_2=None):
     return permutations
 
 
-def compute_accuracy_roc(predictions, labels):
-    dmax = np.max(predictions)
-    dmin = np.min(predictions)
+def compute_accuracy_roc(predictions, labels, d=0.5):
     nsame = np.sum(labels == 1)
     ndiff = np.sum(labels == 0)
-    step = 0.01
-    max_acc = 0
 
-    d_optimal = 0
-    for d in np.arange(dmin, dmax + step, step):
-        idx1 = predictions.ravel() <= d
-        idx2 = predictions.ravel() > d
+    idx1 = predictions.ravel() <= d
+    idx2 = predictions.ravel() > d
 
-        tpr = float(np.sum(labels[idx1] == 1)) / nsame
-        tnr = float(np.sum(labels[idx2] == 0)) / ndiff
+    tp = np.sum(labels[idx1] == 1)
+    fp = np.sum(labels[idx1] == 0)
+    tn = np.sum(labels[idx2] == 0)
+    fn = np.sum(labels[idx2] == 1)
 
-        acc = 0.5 * (tpr + tnr)
+    print(tp, fp, nsame)
+    print(tn, fn, ndiff)
+    acc = (tp + tn) / labels.shape[0]
 
-        if acc > max_acc:
-            max_acc = acc
-            d_optimal = d
-
-    return max_acc, d_optimal
+    return acc
 
 
 class SiameseNetworkDataset(Dataset):
@@ -105,7 +99,7 @@ class SiameseNetworkDataset(Dataset):
 
         # randomly sample signer _id's for training
         random.seed(3)
-        train_ids = random.sample(list(self.org.keys()), no_train_signers)[:1]
+        train_ids = random.sample(list(self.org.keys()), no_train_signers)
 
         self.data = []
 
@@ -115,7 +109,7 @@ class SiameseNetworkDataset(Dataset):
                 self.data.extend([(obs[0], obs[1], 1.0) for obs in self.org[_id]])
                 self.data.extend([(obs[0], obs[1], 0.0) for obs in self.forg[_id]])
         else:
-            val_ids = list(set(self.org.keys()).difference(set(train_ids)))[:1] # getting the validation ids
+            val_ids = list(set(self.org.keys()).difference(set(train_ids))) # getting the validation ids
             for _id in val_ids:
                 self.data.extend([(obs[0], obs[1], 1.0) for obs in self.org[_id]])
                 self.data.extend([(obs[0], obs[1], 0.0) for obs in self.forg[_id]])
@@ -152,14 +146,14 @@ class ContrastiveLoss(torch.nn.Module):
     Based on: http://yann.lecun.com/exdb/publis/pdf/hadsell-chopra-lecun-06.pdf
     """
 
-    def __init__(self, margin=1.0):
+    def __init__(self, margin=2.0):
         super(ContrastiveLoss, self).__init__()
         self.margin = margin
 
     def forward(self, output1, output2, label):
         euclidean_distance = F.pairwise_distance(output1, output2, keepdim = True)
         loss_contrastive = torch.mean((label) * torch.pow(euclidean_distance, 2) +
-                                      (1-label) * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2))
+                                      ((1-label) * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2)))
 
         return loss_contrastive
 
@@ -187,10 +181,10 @@ if __name__ == '__main__':
     vis_dataloader = DataLoader(train_dataset, shuffle=True, num_workers=8, batch_size=8)
     dataiter = iter(vis_dataloader)
 
-    example_batch = next(dataiter)
-    concatenated = torch.cat((example_batch[0],example_batch[1]),0)
-    # torchvision.utils.save_image((concatenated), 'train_data.png')
-    imshow(torchvision.utils.make_grid(concatenated))
+    # example_batch = next(dataiter)
+    # concatenated = torch.cat((example_batch[0],example_batch[1]),0)
+    # # torchvision.utils.save_image((concatenated), 'train_data.png')
+    # imshow(torchvision.utils.make_grid(concatenated))
     # print(example_batch[2].numpy())
 
     train_dataloader = DataLoader(train_dataset, shuffle=True, num_workers=8, batch_size=Config.train_batch_size)
@@ -199,7 +193,8 @@ if __name__ == '__main__':
     net = SigNetModel()
 
     criterion = ContrastiveLoss()
-    optimizer = optim.RMSprop(net.parameters(), lr=Config.lr, eps=1e-8, weight_decay=0.0005, momentum=0.9)
+    # optimizer = optim.RMSprop(net.parameters(), lr=Config.lr, eps=1e-8, weight_decay=0.0005, momentum=0.9)
+    optimizer = optim.Adam(net.parameters(), lr=Config.lr, eps=1e-8, weight_decay=0.005)
 
     if is_cuda:
         net.cuda()
@@ -209,7 +204,7 @@ if __name__ == '__main__':
     print(net)
     print("Train data: ", len(train_dataset))
     print("Val data: ", len(val_dataset))
-
+    past_acc = 0.0
     for epoch in range(0, Config.train_number_epochs):
 
         # adjusting learning rate
@@ -261,22 +256,34 @@ if __name__ == '__main__':
             # concatenated = torch.cat((img0, img1), 0)
             # torchvision.utils.save_image((concatenated), 'Dissimilarity: {:.2f}'.format(euclidean_distance.item()), 'val_'+epoch+'.png')
 
-        acc, d = compute_accuracy_roc(np.array(val_predictions), np.array(val_labels))
+        acc = compute_accuracy_roc(np.array(val_predictions), np.array(val_labels))
+        if acc > past_acc:
+            past_acc = acc
+            torch.save(net.state_dict(), Config.file_prefix + 'cedar_cl.dth')
+            print("Saving the model parameters")
+
         metric_history['val'].append(acc_val_loss / (i+1))
         metric_history['acc'].append(acc)
-        print("\nEpoch number {} Train loss {} Val loss {}".format(epoch, metric_history['train'][-1], metric_history['val'][-1]))
-        print('Max accuracy {} at distance threshold {}'.format(acc, d))
-
-    torch.save(net.state_dict(), Config.file_prefix+'cedar_cl.dth')
+        print("Epoch number {} Train loss {} Val loss {}".format(epoch, metric_history['train'][-1], metric_history['val'][-1]))
+        print('Val accuracy {}\n'.format(acc))
 
     # plot loss metric
-    # plt.figure()
-    # plt.clf()
-    # iter = [i for i in range(0, epoch+1)]
-    # plt.plot(iter, metric_history['train'], '-r', label='train loss')
-    # plt.plot(iter, metric_history['val'], '-b', label='val loss')
-    # # plt.plot(iter, metric_history['acc'], '-g', label='val accuracy')
-    # plt.xlabel("epochs")
-    # plt.ylabel("loss")
-    # plt.legend(loc='upper left')
-    # plt.savefig('loss_plot.png')
+    plt.figure()
+    plt.clf()
+    iter = [i for i in range(0, epoch+1)]
+    plt.plot(iter, metric_history['train'], '-r', label='train loss')
+    plt.plot(iter, metric_history['val'], '-b', label='val loss')
+    # plt.plot(iter, metric_history['acc'], '-g', label='val accuracy')
+    plt.xlabel("epochs")
+    plt.ylabel("loss")
+    plt.legend(loc='upper left')
+    plt.savefig(Config.file_prefix+'loss_plot.png')
+
+    # plot accuracy
+    plt.figure()
+    iter = [i for i in range(0, epoch + 1)]
+    plt.plot(iter, metric_history['acc'], '-g', label='accuracy')
+    plt.xlabel("epochs")
+    plt.ylabel("accuracy")
+    plt.legend(loc='upper left')
+    plt.savefig(Config.file_prefix + 'acc_plot.png')

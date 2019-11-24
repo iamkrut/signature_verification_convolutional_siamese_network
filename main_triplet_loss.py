@@ -85,7 +85,7 @@ class SiameseNetworkDataset(Dataset):
 
         # randomly sample signer _id's for training
         random.seed(3)
-        train_ids = random.sample(list(self.org.keys()), no_train_signers)
+        train_ids = random.sample(list(self.org.keys()), no_train_signers)[:1]
 
         self.data = []
 
@@ -94,7 +94,7 @@ class SiameseNetworkDataset(Dataset):
             for _id in train_ids:
                 self.data.extend([(obs[0], obs[1], obs[2]) for obs in self.org[_id]])
         else:
-            val_ids = list(set(self.org.keys()).difference(set(train_ids))) # getting the validation ids
+            val_ids = list(set(self.org.keys()).difference(set(train_ids)))[:1] # getting the validation ids
             for _id in val_ids:
                 self.data.extend([(obs[0], obs[1], obs[2]) for obs in self.org[_id]])
 
@@ -209,8 +209,8 @@ if __name__ == '__main__':
                 img0, img1 , img2 = img0.cuda(), img1.cuda(), img2.cuda()
             optimizer.zero_grad()
             output1, output2, output3 = net(img0, img1, img2)
-            distance_positive = (output1 - output2).pow(2).sum(1)
-            distance_negative = (output1 - output3).pow(2).sum(1)
+            distance_positive = F.pairwise_distance(output1, output2, keepdim = True)
+            distance_negative = F.pairwise_distance(output1, output3, keepdim = True)
             target = torch.FloatTensor(distance_positive.size()).fill_(1)
             if is_cuda:
                 target = target.cuda()
@@ -229,13 +229,18 @@ if __name__ == '__main__':
                 img0, img1 , img2 = img0.cuda(), img1.cuda(), img2.cuda()
             output1, output2, output3 = net(img0, img1, img2)
 
-            distance_positive = (output1 - output2).pow(2).sum(1)
-            distance_negative = (output1 - output3).pow(2).sum(1)
+            distance_positive = F.pairwise_distance(output1, output2, keepdim=True)
+            distance_negative = F.pairwise_distance(output1, output3, keepdim=True)
             target = torch.FloatTensor(distance_positive.size()).fill_(1)
             if is_cuda:
                 target = target.cuda()
             loss_triplet = criterion(distance_positive, distance_negative, target, is_val=True)
             acc_val_loss += loss_triplet.item()
+
+
+        print(criterion.accuracy)
+        print(sum(criterion.accuracy))
+        print(len(criterion.accuracy))
 
         acc = sum(criterion.accuracy) / len(criterion.accuracy)
         metric_history['val'].append(acc_val_loss / (i+1))
