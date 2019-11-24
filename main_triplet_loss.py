@@ -39,9 +39,10 @@ class Config:
     forged_dir = "./signatures/full_forg/"
     train_batch_size = 16
     val_batch_size = 8
-    train_number_epochs = 5
+    train_number_epochs = 50
     lr = 1e-3
     file_prefix = "triplet_"
+
 
 def format_image_name(filename):
     ref = re.findall(r'\d+', filename)
@@ -57,31 +58,6 @@ def generate_permutations(list_1, list_2=None):
         for a, b in it.combinations(list_1, 2):
             permutations.append((a, b))
     return permutations
-
-
-def compute_accuracy_roc(predictions, labels):
-    dmax = np.max(predictions)
-    dmin = np.min(predictions)
-    nsame = np.sum(labels == 1)
-    ndiff = np.sum(labels == 0)
-    step = 0.01
-    max_acc = 0
-
-    d_optimal = 0
-    for d in np.arange(dmin, dmax + step, step):
-        idx1 = predictions.ravel() <= d
-        idx2 = predictions.ravel() > d
-
-        tpr = float(np.sum(labels[idx1] == 1)) / nsame
-        tnr = float(np.sum(labels[idx2] == 0)) / ndiff
-
-        acc = 0.5 * (tpr + tnr)
-
-        if acc > max_acc:
-            max_acc = acc
-            d_optimal = d
-
-    return max_acc, d_optimal
 
 
 class SiameseNetworkDataset(Dataset):
@@ -161,12 +137,18 @@ class TripletLoss(nn.Module):
     def __init__(self, margin=1.0):
         super(TripletLoss, self).__init__()
         self.margin = margin
+        self.accuracy = []
+        self.margin_loss = torch.nn.MarginRankingLoss(margin=self.margin)
 
-    def forward(self, anchor, positive, negative, size_average=True):
-        distance_positive = (anchor - positive).pow(2).sum(1)  # .pow(.5)
-        distance_negative = (anchor - negative).pow(2).sum(1)  # .pow(.5)
-        losses = F.relu(distance_positive - distance_negative + self.margin)
+    def forward(self, distance_positive, distance_negative, target, size_average=True, is_val=False):
+        losses = self.margin_loss(distance_positive, distance_negative, target)
+
+        if is_val:
+            pred = (distance_positive - distance_negative - self.margin).data
+            self.accuracy.append(((pred > 0).sum()*1.0/distance_positive.size()[0]).item())
+
         return losses.mean() if size_average else losses.sum()
+
 
 if __name__ == '__main__':
 
@@ -194,7 +176,7 @@ if __name__ == '__main__':
     example_batch = next(dataiter)
     concatenated = torch.cat((example_batch[0],example_batch[1]),0)
     # torchvision.utils.save_image((concatenated), 'train_data.png')
-    imshow(torchvision.utils.make_grid(concatenated))
+    # imshow(torchvision.utils.make_grid(concatenated))
     # print(example_batch[2].numpy())
 
     train_dataloader = DataLoader(train_dataset, shuffle=True, num_workers=8, batch_size=Config.train_batch_size)
@@ -216,19 +198,8 @@ if __name__ == '__main__':
 
     for epoch in range(0, Config.train_number_epochs):
 
-        # adjusting learning rate
-        # lr = Config.lr * (0.1 ** epoch)
-        # for param_group in optimizer.param_groups:
-        #     param_group['lr'] = lr
-        #
-        # print("lr: ", lr)
-
         acc_train_loss = 0
         acc_val_loss = 0
-        avg_acc = 0
-        avg_distance_threshold = 0
-        val_predictions = []
-        val_labels = []
 
         # training
         net.train()
@@ -238,7 +209,12 @@ if __name__ == '__main__':
                 img0, img1 , img2 = img0.cuda(), img1.cuda(), img2.cuda()
             optimizer.zero_grad()
             output1, output2, output3 = net(img0, img1, img2)
-            loss_triplet = criterion(output1, output2, output3)
+            distance_positive = (output1 - output2).pow(2).sum(1)
+            distance_negative = (output1 - output3).pow(2).sum(1)
+            target = torch.FloatTensor(distance_positive.size()).fill_(1)
+            if is_cuda:
+                target = target.cuda()
+            loss_triplet = criterion(distance_positive, distance_negative, target)
             loss_triplet.backward()
             optimizer.step()
             acc_train_loss += loss_triplet.item()
@@ -246,30 +222,26 @@ if __name__ == '__main__':
 
         # validation
         net.eval()
+        criterion.accuracy = []
         for i, data in enumerate(val_dataloader, 0):
             img0, img1, img2 = data
             if is_cuda:
                 img0, img1 , img2 = img0.cuda(), img1.cuda(), img2.cuda()
             output1, output2, output3 = net(img0, img1, img2)
-            loss_triplet = criterion(output1, output2, output3)
+
+            distance_positive = (output1 - output2).pow(2).sum(1)
+            distance_negative = (output1 - output3).pow(2).sum(1)
+            target = torch.FloatTensor(distance_positive.size()).fill_(1)
+            if is_cuda:
+                target = target.cuda()
+            loss_triplet = criterion(distance_positive, distance_negative, target, is_val=True)
             acc_val_loss += loss_triplet.item()
 
-            # predictions
-            # euclidean_distance = F.pairwise_distance(output1, output2, keepdim=True)
-            # if is_cuda:
-            #     euclidean_distance = euclidean_distance.cpu()
-            #     label = label.cpu()
-            # val_predictions.extend(euclidean_distance.detach().numpy())
-            # val_labels.extend(label.detach().numpy())
-
-            # concatenated = torch.cat((img0, img1), 0)
-            # torchvision.utils.save_image((concatenated), 'Dissimilarity: {:.2f}'.format(euclidean_distance.item()), 'val_'+epoch+'.png')
-
-        # acc, d = compute_accuracy_roc(np.array(val_predictions), np.array(val_labels))
+        acc = sum(criterion.accuracy) / len(criterion.accuracy)
         metric_history['val'].append(acc_val_loss / (i+1))
         # metric_history['acc'].append(acc)
         print("\nEpoch number {} Train loss {} Val loss {}".format(epoch, metric_history['train'][-1], metric_history['val'][-1]))
-        # print('Max accuracy {} at distance threshold {}'.format(acc, d))
+        print('Accuracy {}'.format(acc))
 
     torch.save(net.state_dict(), Config.file_prefix+'cedar_cl.dth')
 
